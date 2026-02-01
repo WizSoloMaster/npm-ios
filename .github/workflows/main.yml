@@ -17,9 +17,7 @@ jobs:
       - name: List schemes (debug)
         run: xcodebuild -list -project NPM.xcodeproj
 
-      # Fix for Xcode 16.x SwiftUI SecureField initializer mismatch:
-      # SecureField(LocalizedStringResource(...), text: ...) -> SecureField(String, text: ...)
-      - name: Patch SecureField compile error
+      - name: Patch SecureField compile error (Xcode 16)
         shell: bash
         run: |
           set -euo pipefail
@@ -27,19 +25,12 @@ jobs:
 
           if [ ! -f "$FILE" ]; then
             echo "Patch file not found: $FILE"
-            find . -maxdepth 3 -type f -name "AccessListFormView.swift" -print
+            find . -maxdepth 5 -type f -name "AccessListFormView.swift" -print
             exit 1
           fi
 
-          echo "Before patch (matching lines):"
-          grep -n "SecureField(" "$FILE" || true
-
           perl -pi -e 's/SecureField\(LocalizedStringResource\(stringLiteral:\s*credential\.hint\),\s*text:\s*\$credential\.password\)/SecureField(credential.hint, text: \$credential.password)/g' "$FILE"
 
-          echo "After patch (matching lines):"
-          grep -n "SecureField(" "$FILE" || true
-
-          # Optional: fail fast if the original pattern still exists
           if grep -q "LocalizedStringResource(stringLiteral: credential.hint)" "$FILE"; then
             echo "Patch did not apply (pattern still present)."
             exit 1
@@ -65,13 +56,44 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="" \
             | tee build/xcodebuild.log
 
-      - name: Package unsigned .ipa
+      - name: Package unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
 
           APP_DIR="$PWD/build/unsigned.xcarchive/Products/Applications"
           echo "Looking for .app in: $APP_DIR"
-          ls -la "$APP_DIR" || true
+          ls -la "$APP_DIR"
 
-          APP_PATH="$(find "$APP_DIR" -maxdepth 1 -name "*.
+          # Find the first *.app directory safely (no fragile quoting)
+          APP_PATH="$(/usr/bin/find "$APP_DIR" -maxdepth 1 -type d -name '*.app' | /usr/bin/head -n 1)"
+
+          if [ -z "${APP_PATH:-}" ]; then
+            echo "ERROR: No .app found to package."
+            exit 1
+          fi
+
+          echo "Found app: $APP_PATH"
+
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+
+          # IPA is a zip containing Payload/<App>.app
+          (cd build && /usr/bin/zip -r npm-ios-unsigned.ipa Payload)
+
+          echo "Created:"
+          ls -la build/npm-ios-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-ios-unsigned-ipa
+          path: build/npm-ios-unsigned.ipa
+
+      - name: Upload build log
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build/xcodebuild.log
+
